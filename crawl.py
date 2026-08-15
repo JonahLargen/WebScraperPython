@@ -1,6 +1,8 @@
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
+
+CRAWLABLE_SCHEMES = ("http", "https")
 
 DEFAULT_PORTS = {
     "http": 80,
@@ -50,6 +52,30 @@ def get_first_paragraph_from_html(html: str) -> str:
         paragraph = soup.find("p")
 
     return tag_text(paragraph)
+
+
+def get_urls_from_html(html, base_url):
+    return get_links_from_html(html, base_url, "a", "href")
+
+
+def get_images_from_html(html, base_url):
+    return get_links_from_html(html, base_url, "img", "src")
+
+
+def get_links_from_html(html, base_url, tag_name, attribute):
+    soup = BeautifulSoup(html, "html.parser")
+
+    urls = []
+    for tag in soup.find_all(tag_name):
+        value = tag.get(attribute)
+        if not isinstance(value, str) or not value.strip():
+            continue # the attribute is missing or empty
+
+        url = urljoin(base_url, value.strip())
+        if urlsplit(url).scheme in CRAWLABLE_SCHEMES: # skips mailto:, tel:, javascript:, data:
+            urls.append(url)
+
+    return urls
 
 
 def tag_text(tag) -> str:

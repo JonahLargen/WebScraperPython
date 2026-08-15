@@ -3,6 +3,8 @@ import unittest
 from crawl import (
     get_first_paragraph_from_html,
     get_heading_from_html,
+    get_images_from_html,
+    get_urls_from_html,
     normalize_url,
 )
 
@@ -265,6 +267,211 @@ class TestGetFirstParagraphFromHTML(unittest.TestCase):
     def test_handles_unclosed_tag(self):
         actual = get_first_paragraph_from_html("<html><body><p>Unclosed paragraph.")
         self.assertEqual(actual, "Unclosed paragraph.")
+
+
+class TestGetURLsFromHTML(unittest.TestCase):
+    def test_get_urls_from_html_absolute(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><a href="https://crawler-test.com"><span>Boot.dev</span></a></body></html>'
+        actual = get_urls_from_html(input_body, input_url)
+        expected = ["https://crawler-test.com"]
+        self.assertEqual(actual, expected)
+
+    def test_get_urls_from_html_relative(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><a href="/about">About</a></body></html>'
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/about"])
+
+    def test_finds_all_anchors_in_document_order(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <nav><a href="/one">One</a></nav>
+            <main><div><a href="/two">Two</a></div></main>
+            <footer><a href="https://other.com/three">Three</a></footer>
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        expected = [
+            "https://crawler-test.com/one",
+            "https://crawler-test.com/two",
+            "https://other.com/three",
+        ]
+        self.assertEqual(actual, expected)
+
+    def test_relative_to_base_url_with_a_path(self):
+        input_url = "https://crawler-test.com/docs/"
+        input_body = """<html><body>
+            <a href="intro">Sibling</a>
+            <a href="/root">Root</a>
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        expected = [
+            "https://crawler-test.com/docs/intro",
+            "https://crawler-test.com/root",
+        ]
+        self.assertEqual(actual, expected)
+
+    def test_protocol_relative_url_uses_base_scheme(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><a href="//cdn.example.com/page">CDN</a></body></html>'
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://cdn.example.com/page"])
+
+    def test_fragment_link_resolves_against_base(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><a href="#about">About</a></body></html>'
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com#about"])
+
+    def test_returns_empty_list_when_no_anchors(self):
+        input_url = "https://crawler-test.com"
+        input_body = "<html><body><p>No links here.</p></body></html>"
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, [])
+
+    def test_returns_empty_list_for_empty_html(self):
+        self.assertEqual(get_urls_from_html("", "https://crawler-test.com"), [])
+
+    def test_skips_anchors_without_href(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a name="anchor">No href</a>
+            <a href="">Empty href</a>
+            <a href="   ">Whitespace href</a>
+            <a href="/real">Real link</a>
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/real"])
+
+    def test_skips_non_http_schemes(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="mailto:hello@crawler-test.com">Email</a>
+            <a href="tel:+15555555555">Call</a>
+            <a href="javascript:void(0)">Click</a>
+            <a href="/real">Real link</a>
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/real"])
+
+    def test_trims_whitespace_around_href(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><a href="  /about  ">About</a></body></html>'
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/about"])
+
+    def test_keeps_duplicate_links(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="/about">About</a>
+            <a href="/about">About again</a>
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        expected = ["https://crawler-test.com/about", "https://crawler-test.com/about"]
+        self.assertEqual(actual, expected)
+
+    def test_ignores_image_sources(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="https://crawler-test.com">Go to Boot.dev</a>
+            <img src="/logo.png" alt="Boot.dev Logo" />
+        </body></html>"""
+        actual = get_urls_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com"])
+
+
+class TestGetImagesFromHTML(unittest.TestCase):
+    def test_get_images_from_html_relative(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><img src="/logo.png" alt="Logo"></body></html>'
+        actual = get_images_from_html(input_body, input_url)
+        expected = ["https://crawler-test.com/logo.png"]
+        self.assertEqual(actual, expected)
+
+    def test_get_images_from_html_absolute(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><img src="https://cdn.example.com/logo.png"></body></html>'
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://cdn.example.com/logo.png"])
+
+    def test_finds_all_images_in_document_order(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <img src="/one.png" alt="One">
+            <figure><img src="two.jpg"></figure>
+            <img src="https://cdn.example.com/three.gif">
+        </body></html>"""
+        actual = get_images_from_html(input_body, input_url)
+        expected = [
+            "https://crawler-test.com/one.png",
+            "https://crawler-test.com/two.jpg",
+            "https://cdn.example.com/three.gif",
+        ]
+        self.assertEqual(actual, expected)
+
+    def test_relative_to_base_url_with_a_path(self):
+        input_url = "https://crawler-test.com/docs/"
+        input_body = """<html><body>
+            <img src="local.png">
+            <img src="/root.png">
+        </body></html>"""
+        actual = get_images_from_html(input_body, input_url)
+        expected = [
+            "https://crawler-test.com/docs/local.png",
+            "https://crawler-test.com/root.png",
+        ]
+        self.assertEqual(actual, expected)
+
+    def test_protocol_relative_url_uses_base_scheme(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><img src="//cdn.example.com/logo.png"></body></html>'
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://cdn.example.com/logo.png"])
+
+    def test_returns_empty_list_when_no_images(self):
+        input_url = "https://crawler-test.com"
+        input_body = "<html><body><p>No images here.</p></body></html>"
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, [])
+
+    def test_returns_empty_list_for_empty_html(self):
+        self.assertEqual(get_images_from_html("", "https://crawler-test.com"), [])
+
+    def test_skips_images_without_src(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <img alt="No source">
+            <img src="">
+            <img src="   ">
+            <img srcset="/wide.png 2x">
+            <img src="/real.png">
+        </body></html>"""
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/real.png"])
+
+    def test_skips_data_uris(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+            <img src="/real.png">
+        </body></html>"""
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/real.png"])
+
+    def test_trims_whitespace_around_src(self):
+        input_url = "https://crawler-test.com"
+        input_body = '<html><body><img src="  /logo.png  "></body></html>'
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/logo.png"])
+
+    def test_ignores_anchor_hrefs(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="https://crawler-test.com">Go to Boot.dev</a>
+            <img src="/logo.png" alt="Boot.dev Logo" />
+        </body></html>"""
+        actual = get_images_from_html(input_body, input_url)
+        self.assertEqual(actual, ["https://crawler-test.com/logo.png"])
 
 
 if __name__ == "__main__":
