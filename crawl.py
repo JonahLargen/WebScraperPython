@@ -13,6 +13,8 @@ TIMEOUT_SECONDS = 10
 
 MAX_CONCURRENCY = 5
 
+MAX_PAGES = 100
+
 DEFAULT_PORTS = {
     "http": 80,
     "https": 443,
@@ -28,7 +30,7 @@ class PageData(TypedDict):
 
 
 class AsyncCrawler:
-    def __init__(self, base_url, max_concurrency=MAX_CONCURRENCY):
+    def __init__(self, base_url, max_concurrency=MAX_CONCURRENCY, max_pages=MAX_PAGES):
         self.base_url = base_url
         self.base_domain = get_host(base_url)
         self.page_data = {}
@@ -36,6 +38,9 @@ class AsyncCrawler:
         self.max_concurrency = max_concurrency
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self.session = None
+        self.max_pages = max_pages
+        self.should_stop = False
+        self.all_tasks = set()
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -52,17 +57,25 @@ class AsyncCrawler:
         return {url: data for url, data in self.page_data.items() if data is not None}
 
     async def crawl_page(self, current_url=None):
+        if self.should_stop:
+            return
+
         if current_url is None:
             current_url = self.base_url
 
         if get_host(current_url) != self.base_domain:
             return # off-site, we only crawl the one domain
 
-        normalized_url = normalize_url(current_url)
-        if not await self.add_page_visit(normalized_url):
-            return # another task got here first
+        # the semaphore caps requests in flight, and claiming inside it keeps
+        # queued tasks from reserving every max_pages slot before a fetch lands
+        async with self.semaphore:
+            if self.should_stop:
+                return
 
-        async with self.semaphore: # caps how many requests are in flight at once
+            normalized_url = normalize_url(current_url)
+            if not await self.add_page_visit(normalized_url):
+                return # another task got here first, or we hit max_pages
+
             print(f"crawling: {current_url}")
             try:
                 html = await self.get_html(current_url)
@@ -74,14 +87,30 @@ class AsyncCrawler:
         async with self.lock:
             self.page_data[normalized_url] = data
 
-        tasks = [
-            asyncio.create_task(self.crawl_page(url))
-            for url in data["outgoing_links"]
-        ]
-        await asyncio.gather(*tasks)
+        tasks = set()
+        for url in data["outgoing_links"]:
+            task = asyncio.create_task(self.crawl_page(url))
+            tasks.add(task)
+            self.all_tasks.add(task)
+
+        try:
+            # return_exceptions keeps a cancelled child from tearing down its parent
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.all_tasks -= tasks
 
     async def add_page_visit(self, normalized_url):
         async with self.lock:
+            if self.should_stop:
+                return False
+
+            if len(self.page_data) >= self.max_pages:
+                self.should_stop = True
+                print("Reached maximum number of pages to crawl.")
+                for task in list(self.all_tasks):
+                    task.cancel()
+                return False
+
             if normalized_url in self.page_data:
                 return False
 
@@ -99,8 +128,8 @@ class AsyncCrawler:
             return await response.text()
 
 
-async def crawl_site_async(base_url, max_concurrency=MAX_CONCURRENCY):
-    async with AsyncCrawler(base_url, max_concurrency) as crawler:
+async def crawl_site_async(base_url, max_concurrency=MAX_CONCURRENCY, max_pages=MAX_PAGES):
+    async with AsyncCrawler(base_url, max_concurrency, max_pages) as crawler:
         return await crawler.crawl()
 
 
