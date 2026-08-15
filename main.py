@@ -1,6 +1,6 @@
 import sys
 
-from crawl import get_html
+from crawl import crawl_page
 
 
 def main():
@@ -14,8 +14,31 @@ def main():
     base_url = sys.argv[1]
     print(f"starting crawl of: {base_url}")
 
-    html = get_html(base_url)
-    print(html)
+    page_data = crawl_page(base_url)
+    print_report(page_data)
+
+
+def print_report(page_data):
+    print()
+    print("=" * 60)
+    print(f"crawl complete: {len(page_data)} pages found")
+    print("=" * 60)
+
+    for normalized_url, data in page_data.items():
+        print()
+        print(normalized_url)
+        print(f"  url:             {data['url']}")
+        print(f"  heading:         {truncate(data['heading'])}")
+        print(f"  first paragraph: {truncate(data['first_paragraph'])}")
+        print(f"  outgoing links:  {len(data['outgoing_links'])}")
+        print(f"  images:          {len(data['image_urls'])}")
+
+
+def truncate(text, limit=80):
+    if len(text) <= limit:
+        return text
+
+    return text[: limit - 3] + "..."
 
 
 if __name__ == "__main__":

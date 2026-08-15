@@ -24,6 +24,34 @@ class PageData(TypedDict):
     image_urls: list[str]
 
 
+def crawl_page(base_url, current_url=None, page_data=None):
+    if current_url is None:
+        current_url = base_url
+    if page_data is None:
+        page_data = {}
+
+    if get_host(current_url) != get_host(base_url):
+        return page_data # stay on domain
+
+    normalized_url = normalize_url(current_url)
+    if normalized_url in page_data:
+        return page_data # already crawled
+
+    print(f"crawling: {current_url}")
+    try:
+        html = get_html(current_url)
+    except Exception as err:
+        print(f"  skipping {current_url}: {err}")
+        return page_data
+
+    page_data[normalized_url] = extract_page_data(html, current_url)
+
+    for url in page_data[normalized_url]["outgoing_links"]:
+        crawl_page(base_url, url, page_data)
+
+    return page_data
+
+
 def normalize_url(url):
     if not isinstance(url, str):
         raise TypeError(f"url must be a string, got {type(url).__name__}")
@@ -32,9 +60,7 @@ def normalize_url(url):
     if not stripped:
         raise ValueError("url must not be empty")
 
-    parts = urlsplit(stripped)
-    if not parts.scheme and not parts.netloc:
-        parts = urlsplit("//" + stripped)
+    parts = split_url(stripped)
 
     host = parts.hostname
     if not host:
@@ -115,6 +141,18 @@ def get_links_from_html(html, base_url, tag_name, attribute):
             urls.append(url)
 
     return urls
+
+
+def split_url(url):
+    parts = urlsplit(url.strip())
+    if not parts.scheme and not parts.netloc: # ensures the host lands in netloc, adds the "//" urlsplit needs to see one
+        parts = urlsplit("//" + url.strip())
+
+    return parts
+
+
+def get_host(url):
+    return split_url(url).hostname or ""
 
 
 def tag_text(tag) -> str:
