@@ -1,7 +1,8 @@
+import asyncio
 from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
-import requests
+import aiohttp
 from bs4 import BeautifulSoup, Tag
 
 CRAWLABLE_SCHEMES = ("http", "https")
@@ -9,6 +10,8 @@ CRAWLABLE_SCHEMES = ("http", "https")
 USER_AGENT = "BootCrawler/1.0"
 
 TIMEOUT_SECONDS = 10
+
+MAX_CONCURRENCY = 5
 
 DEFAULT_PORTS = {
     "http": 80,
@@ -24,32 +27,81 @@ class PageData(TypedDict):
     image_urls: list[str]
 
 
-def crawl_page(base_url, current_url=None, page_data=None):
-    if current_url is None:
-        current_url = base_url
-    if page_data is None:
-        page_data = {}
+class AsyncCrawler:
+    def __init__(self, base_url, max_concurrency=MAX_CONCURRENCY):
+        self.base_url = base_url
+        self.base_domain = get_host(base_url)
+        self.page_data = {}
+        self.lock = asyncio.Lock()
+        self.max_concurrency = max_concurrency
+        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.session = None
 
-    if get_host(current_url) != get_host(base_url):
-        return page_data # stay on domain
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(
+            headers={"User-Agent": USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS),
+        )
+        return self
 
-    normalized_url = normalize_url(current_url)
-    if normalized_url in page_data:
-        return page_data # already crawled
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.session.close()
 
-    print(f"crawling: {current_url}")
-    try:
-        html = get_html(current_url)
-    except Exception as err:
-        print(f"  skipping {current_url}: {err}")
-        return page_data
+    async def crawl(self):
+        await self.crawl_page(self.base_url)
+        return {url: data for url, data in self.page_data.items() if data is not None}
 
-    page_data[normalized_url] = extract_page_data(html, current_url)
+    async def crawl_page(self, current_url=None):
+        if current_url is None:
+            current_url = self.base_url
 
-    for url in page_data[normalized_url]["outgoing_links"]:
-        crawl_page(base_url, url, page_data)
+        if get_host(current_url) != self.base_domain:
+            return # off-site, we only crawl the one domain
 
-    return page_data
+        normalized_url = normalize_url(current_url)
+        if not await self.add_page_visit(normalized_url):
+            return # another task got here first
+
+        async with self.semaphore: # caps how many requests are in flight at once
+            print(f"crawling: {current_url}")
+            try:
+                html = await self.get_html(current_url)
+            except Exception as err:
+                print(f"  skipping {current_url}: {err}")
+                return
+
+        data = extract_page_data(html, current_url)
+        async with self.lock:
+            self.page_data[normalized_url] = data
+
+        tasks = [
+            asyncio.create_task(self.crawl_page(url))
+            for url in data["outgoing_links"]
+        ]
+        await asyncio.gather(*tasks)
+
+    async def add_page_visit(self, normalized_url):
+        async with self.lock:
+            if normalized_url in self.page_data:
+                return False
+
+            self.page_data[normalized_url] = None # claims the url before we await anything
+            return True
+
+    async def get_html(self, url):
+        async with self.session.get(url) as response:
+            response.raise_for_status() # raises aiohttp.ClientResponseError on 400+
+
+            content_type = response.headers.get("Content-Type", "")
+            if not content_type.strip().lower().startswith("text/html"):
+                raise ValueError(f"expected text/html, got '{content_type}' for {url}")
+
+            return await response.text()
+
+
+async def crawl_site_async(base_url, max_concurrency=MAX_CONCURRENCY):
+    async with AsyncCrawler(base_url, max_concurrency) as crawler:
+        return await crawler.crawl()
 
 
 def normalize_url(url):
@@ -75,21 +127,6 @@ def normalize_url(url):
     path = parts.path.rstrip("/")
 
     return host + path
-
-
-def get_html(url):
-    response = requests.get(
-        url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=TIMEOUT_SECONDS,
-    )
-    response.raise_for_status() # raises requests.HTTPError on 400+
-
-    content_type = response.headers.get("Content-Type", "")
-    if not content_type.strip().lower().startswith("text/html"):
-        raise ValueError(f"expected text/html, got '{content_type}' for {url}")
-
-    return response.text
 
 
 def extract_page_data(html: str, page_url: str) -> PageData:
