@@ -7,11 +7,15 @@ Async crawler for a single domain. Extracts the heading, first paragraph, links 
 ```bash
 # uv run main.py URL [max_concurrency] [max_pages]
 uv run main.py "https://learnwebscraping.dev/practice/ecommerce/" 3 25
-
-uv run -m unittest
 ```
 
 Writes `report.json` and `report.png` to the working directory.
+
+Tests:
+
+```bash
+uv run -m unittest
+```
 
 ## Output
 
@@ -34,6 +38,8 @@ Writes `report.json` and `report.png` to the working directory.
 `outgoing_links` is every link on the page. `internal_links` and `external_links` split that list by host, so the two add up to it. A different subdomain counts as external because the crawler won't follow it.
 
 `report.png` is a node per crawled page and an edge per internal link between two of them. Node size is inbound links, colour is external link count. Labels are dropped past 60 nodes.
+
+<img src="docs/example-report.png" alt="Example link graph" width="500">
 
 ## Scheduling
 

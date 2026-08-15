@@ -60,6 +60,7 @@ def write_graph_report(page_data, filename="report.png"):
         "\n(node size = inbound links)"
     )
     axes.axis("off")
+    axes.margins(0.12) # labels on outer nodes get clipped without this
     figure.tight_layout()
     figure.savefig(filename, dpi=150)
     plt.close(figure)
