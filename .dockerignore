@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+.vs
+.vscode
+__pycache__
+*.pyc
+.env
+output
+report.json
+report.png
+Dockerfile
+docker-compose.yml
+LICENSE

@@ -430,3 +430,8 @@ FodyWeavers.xsd
 
 # Crawler output
 report.json
+report.png
+output/
+
+# Local environment
+.env

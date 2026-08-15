@@ -1,23 +1,25 @@
 import asyncio
 import sys
 
-from crawl import MAX_CONCURRENCY, MAX_PAGES, crawl_site_async
-from json_report import write_json_report
+from config import Settings, configure_logging
+from pipeline import run_report
 
 
 async def main():
-    base_url, max_concurrency, max_pages = parse_args(sys.argv)
+    configure_logging()
 
-    print(f"starting crawl of: {base_url}")
-    print(f"max_concurrency: {max_concurrency}, max_pages: {max_pages}")
+    try:
+        settings = Settings.from_env()
+    except ValueError as err:
+        print(err)
+        sys.exit(1)
 
-    page_data = await crawl_site_async(base_url, max_concurrency, max_pages)
+    apply_args(settings, sys.argv)
 
-    filename = write_json_report(page_data)
-    print(f"crawl complete: {len(page_data)} pages written to {filename}")
+    await run_report(settings)
 
 
-def parse_args(argv):
+def apply_args(settings, argv):
     if len(argv) < 2:
         print("no website provided")
         sys.exit(1)
@@ -25,11 +27,13 @@ def parse_args(argv):
         print("too many arguments provided")
         sys.exit(1)
 
-    base_url = argv[1]
-    max_concurrency = parse_positive_int(argv, 2, "max_concurrency", MAX_CONCURRENCY)
-    max_pages = parse_positive_int(argv, 3, "max_pages", MAX_PAGES)
+    settings.base_url = argv[1]
+    settings.max_concurrency = parse_positive_int(
+        argv, 2, "max_concurrency", settings.max_concurrency
+    )
+    settings.max_pages = parse_positive_int(argv, 3, "max_pages", settings.max_pages)
 
-    return base_url, max_concurrency, max_pages
+    return settings
 
 
 def parse_positive_int(argv, index, name, default):

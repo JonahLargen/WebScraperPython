@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
@@ -15,10 +16,33 @@ MAX_CONCURRENCY = 5
 
 MAX_PAGES = 100
 
+MAX_PAGE_BYTES = 5 * 1024 * 1024
+
+MAX_REDIRECTS = 10
+
+RETRY_ATTEMPTS = 3
+
+RETRY_BASE_DELAY = 1.0
+
+MAX_RETRY_DELAY = 30.0
+
+RETRYABLE_STATUSES = (408, 425, 429, 500, 502, 503, 504)
+
+# extensions worth skipping before we spend a request finding out they are not html
+SKIP_EXTENSIONS = (
+    ".7z", ".avi", ".bmp", ".bz2", ".css", ".csv", ".doc", ".docx", ".exe",
+    ".gif", ".gz", ".ico", ".jpeg", ".jpg", ".js", ".json", ".mov", ".mp3",
+    ".mp4", ".pdf", ".png", ".ppt", ".pptx", ".rar", ".rss", ".svg", ".tar",
+    ".txt", ".wav", ".webm", ".webp", ".woff", ".woff2", ".xls", ".xlsx",
+    ".xml", ".zip",
+)
+
 DEFAULT_PORTS = {
     "http": 80,
     "https": 443,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class PageData(TypedDict):
@@ -26,7 +50,25 @@ class PageData(TypedDict):
     heading: str
     first_paragraph: str
     outgoing_links: list[str]
+    internal_links: list[str]
+    external_links: list[str]
+    internal_link_count: int
+    external_link_count: int
     image_urls: list[str]
+
+
+class CrawlError(Exception):
+    pass
+
+
+class SkipPage(CrawlError):
+    pass
+
+
+class RetryableError(CrawlError):
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class AsyncCrawler:
@@ -41,11 +83,18 @@ class AsyncCrawler:
         self.max_pages = max_pages
         self.should_stop = False
         self.all_tasks = set()
+        self.errors = {}
 
     async def __aenter__(self):
+        connector = aiohttp.TCPConnector(
+            limit=self.max_concurrency,
+            limit_per_host=self.max_concurrency,
+            ttl_dns_cache=300,
+        )
         self.session = aiohttp.ClientSession(
             headers={"User-Agent": USER_AGENT},
             timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS),
+            connector=connector,
         )
         return self
 
@@ -53,8 +102,15 @@ class AsyncCrawler:
         await self.session.close()
 
     async def crawl(self):
+        if not self.base_domain:
+            raise ValueError(f"no host found in base_url: {self.base_url}")
+
         await self.crawl_page(self.base_url)
-        return {url: data for url, data in self.page_data.items() if data is not None}
+
+        crawled = {url: data for url, data in self.page_data.items() if data is not None}
+        logger.info("crawled %d pages, %d failed", len(crawled), len(self.errors))
+
+        return crawled
 
     async def crawl_page(self, current_url=None):
         if self.should_stop:
@@ -65,6 +121,8 @@ class AsyncCrawler:
 
         if get_host(current_url) != self.base_domain:
             return # off-site, we only crawl the one domain
+        if looks_like_binary(current_url):
+            return # .pdf, .zip and friends are never worth fetching
 
         # the semaphore caps requests in flight, and claiming inside it keeps
         # queued tasks from reserving every max_pages slot before a fetch lands
@@ -76,22 +134,38 @@ class AsyncCrawler:
             if not await self.add_page_visit(normalized_url):
                 return # another task got here first, or we hit max_pages
 
-            print(f"crawling: {current_url}")
+            logger.info("crawling: %s", current_url)
             try:
                 html = await self.get_html(current_url)
             except Exception as err:
-                print(f"  skipping {current_url}: {err}")
+                self.record_error(current_url, err)
                 return
 
-        data = extract_page_data(html, current_url)
+        try:
+            data = extract_page_data(html, current_url, self.base_domain)
+        except Exception as err: # malformed markup can still blow up the parser
+            self.record_error(current_url, err)
+            return
+
         async with self.lock:
             self.page_data[normalized_url] = data
 
+        await self.crawl_links(data["internal_links"])
+
+    async def crawl_links(self, links):
         tasks = set()
-        for url in data["outgoing_links"]:
+        for url in dict.fromkeys(links): # de-duplicated, original order kept
+            if self.should_stop:
+                break
+            if normalize_url(url) in self.page_data:
+                continue # dirty read to avoid queueing a task, add_page_visit re-checks
+
             task = asyncio.create_task(self.crawl_page(url))
             tasks.add(task)
             self.all_tasks.add(task)
+
+        if not tasks:
+            return
 
         try:
             # return_exceptions keeps a cancelled child from tearing down its parent
@@ -106,7 +180,7 @@ class AsyncCrawler:
 
             if len(self.page_data) >= self.max_pages:
                 self.should_stop = True
-                print("Reached maximum number of pages to crawl.")
+                logger.info("Reached maximum number of pages to crawl.")
                 for task in list(self.all_tasks):
                     task.cancel()
                 return False
@@ -118,14 +192,54 @@ class AsyncCrawler:
             return True
 
     async def get_html(self, url):
-        async with self.session.get(url) as response:
-            response.raise_for_status() # raises aiohttp.ClientResponseError on 400+
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                return await self.fetch_html(url)
+            except RetryableError as err:
+                if attempt == RETRY_ATTEMPTS:
+                    raise
 
-            content_type = response.headers.get("Content-Type", "")
-            if not content_type.strip().lower().startswith("text/html"):
-                raise ValueError(f"expected text/html, got '{content_type}' for {url}")
+                delay = retry_delay(attempt, err.retry_after)
+                logger.warning("  retrying %s in %.1fs (%s)", url, delay, err)
+                await asyncio.sleep(delay)
 
-            return await response.text()
+    async def fetch_html(self, url):
+        try:
+            async with self.session.get(
+                url,
+                allow_redirects=True,
+                max_redirects=MAX_REDIRECTS,
+            ) as response:
+                if response.status in RETRYABLE_STATUSES:
+                    raise RetryableError(
+                        f"HTTP {response.status}",
+                        retry_after=parse_retry_after(response.headers.get("Retry-After")),
+                    )
+                if response.status >= 400:
+                    raise SkipPage(f"HTTP {response.status}")
+
+                content_type = response.headers.get("Content-Type", "")
+                if not content_type.strip().lower().startswith("text/html"):
+                    raise SkipPage(f"expected text/html, got '{content_type}'")
+
+                declared_bytes = parse_int(response.headers.get("Content-Length"))
+                if declared_bytes is not None and declared_bytes > MAX_PAGE_BYTES:
+                    raise SkipPage(f"page declares {declared_bytes} bytes, over the limit")
+
+                body = await response.content.read(MAX_PAGE_BYTES + 1)
+                if len(body) > MAX_PAGE_BYTES:
+                    raise SkipPage(f"page is over the {MAX_PAGE_BYTES} byte limit")
+
+                return decode_body(body, response.charset)
+        except aiohttp.TooManyRedirects as err:
+            raise SkipPage(f"too many redirects: {err}") from err
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
+            raise RetryableError(f"{type(err).__name__}: {err}") from err
+
+    def record_error(self, url, err):
+        message = f"{type(err).__name__}: {err}"
+        self.errors[url] = message
+        logger.warning("  skipping %s (%s)", url, message)
 
 
 async def crawl_site_async(base_url, max_concurrency=MAX_CONCURRENCY, max_pages=MAX_PAGES):
@@ -158,14 +272,36 @@ def normalize_url(url):
     return host + path
 
 
-def extract_page_data(html: str, page_url: str) -> PageData:
+def extract_page_data(html: str, page_url: str, base_domain=None) -> PageData:
+    if base_domain is None:
+        base_domain = get_host(page_url)
+
+    outgoing_links = get_urls_from_html(html, page_url)
+    internal_links, external_links = classify_links(outgoing_links, base_domain)
+
     return {
         "url": page_url,
         "heading": get_heading_from_html(html),
         "first_paragraph": get_first_paragraph_from_html(html),
-        "outgoing_links": get_urls_from_html(html, page_url),
+        "outgoing_links": outgoing_links,
+        "internal_links": internal_links,
+        "external_links": external_links,
+        "internal_link_count": len(internal_links),
+        "external_link_count": len(external_links),
         "image_urls": get_images_from_html(html, page_url),
     }
+
+
+def classify_links(urls, base_domain):
+    internal = []
+    external = []
+    for url in urls:
+        if get_host(url) == base_domain:
+            internal.append(url)
+        else:
+            external.append(url)
+
+    return internal, external
 
 
 def get_heading_from_html(html: str) -> str:
@@ -221,8 +357,47 @@ def get_host(url):
     return split_url(url).hostname or ""
 
 
+def looks_like_binary(url):
+    return split_url(url).path.lower().endswith(SKIP_EXTENSIONS)
+
+
+def decode_body(body, charset):
+    for encoding in (charset, "utf-8"):
+        if not encoding:
+            continue
+
+        try:
+            return body.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return body.decode("utf-8", errors="replace")
+
+
+def parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_retry_after(value):
+    seconds = parse_int(value) # http-date form is ignored, we fall back to backoff
+    if seconds is None or seconds < 0:
+        return None
+
+    return float(seconds)
+
+
+def retry_delay(attempt, retry_after=None):
+    if retry_after is not None:
+        return min(retry_after, MAX_RETRY_DELAY)
+
+    return min(RETRY_BASE_DELAY * 2 ** (attempt - 1), MAX_RETRY_DELAY)
+
+
 def tag_text(tag) -> str:
     if not isinstance(tag, Tag):
         return ""
-    
+
     return " ".join(tag.get_text().split()) # split()/join() collapses newlines and indentation

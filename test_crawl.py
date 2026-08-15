@@ -1,12 +1,17 @@
 import unittest
 
 from crawl import (
+    classify_links,
+    decode_body,
     extract_page_data,
     get_first_paragraph_from_html,
     get_heading_from_html,
     get_images_from_html,
     get_urls_from_html,
+    looks_like_binary,
     normalize_url,
+    parse_retry_after,
+    retry_delay,
 )
 
 
@@ -490,17 +495,25 @@ class TestExtractPageData(unittest.TestCase):
             "heading": "Test Title",
             "first_paragraph": "This is the first paragraph.",
             "outgoing_links": ["https://crawler-test.com/link1"],
+            "internal_links": ["https://crawler-test.com/link1"],
+            "external_links": [],
+            "internal_link_count": 1,
+            "external_link_count": 0,
             "image_urls": ["https://crawler-test.com/image1.jpg"],
         }
         self.assertEqual(actual, expected)
 
-    def test_returns_all_five_keys(self):
+    def test_returns_expected_keys(self):
         actual = extract_page_data("<html></html>", "https://crawler-test.com")
         expected_keys = {
             "url",
             "heading",
             "first_paragraph",
             "outgoing_links",
+            "internal_links",
+            "external_links",
+            "internal_link_count",
+            "external_link_count",
             "image_urls",
         }
         self.assertEqual(set(actual.keys()), expected_keys)
@@ -513,6 +526,10 @@ class TestExtractPageData(unittest.TestCase):
             "heading": "",
             "first_paragraph": "",
             "outgoing_links": [],
+            "internal_links": [],
+            "external_links": [],
+            "internal_link_count": 0,
+            "external_link_count": 0,
             "image_urls": [],
         }
         self.assertEqual(actual, expected)
@@ -534,6 +551,10 @@ class TestExtractPageData(unittest.TestCase):
             "heading": "Fallback Title",
             "first_paragraph": "Main paragraph.",
             "outgoing_links": ["https://crawler-test.com/blog/post"],
+            "internal_links": ["https://crawler-test.com/blog/post"],
+            "external_links": [],
+            "internal_link_count": 1,
+            "external_link_count": 0,
             "image_urls": ["https://crawler-test.com/shared/logo.png"],
         }
         self.assertEqual(actual, expected)
@@ -559,6 +580,10 @@ class TestExtractPageData(unittest.TestCase):
                 "https://crawler-test.com/one",
                 "https://other.com/two",
             ],
+            "internal_links": ["https://crawler-test.com/one"],
+            "external_links": ["https://other.com/two"],
+            "internal_link_count": 1,
+            "external_link_count": 1,
             "image_urls": [
                 "https://crawler-test.com/one.png",
                 "https://cdn.example.com/two.png",
@@ -566,10 +591,130 @@ class TestExtractPageData(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
+    def test_subdomains_count_as_external(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="/internal">Internal</a>
+            <a href="https://blog.crawler-test.com/post">Subdomain</a>
+        </body></html>"""
+        actual = extract_page_data(input_body, input_url)
+        self.assertEqual(actual["internal_links"], ["https://crawler-test.com/internal"])
+        self.assertEqual(
+            actual["external_links"], ["https://blog.crawler-test.com/post"]
+        )
+
+    def test_base_domain_argument_overrides_page_host(self):
+        input_url = "https://cdn.crawler-test.com/mirror"
+        input_body = """<html><body>
+            <a href="https://crawler-test.com/home">Home</a>
+            <a href="/local">Local</a>
+        </body></html>"""
+        actual = extract_page_data(input_body, input_url, "crawler-test.com")
+        self.assertEqual(actual["internal_links"], ["https://crawler-test.com/home"])
+        self.assertEqual(
+            actual["external_links"], ["https://cdn.crawler-test.com/local"]
+        )
+
+    def test_counts_match_the_lists(self):
+        input_url = "https://crawler-test.com"
+        input_body = """<html><body>
+            <a href="/one">One</a>
+            <a href="/one">One again</a>
+            <a href="https://other.com/a">A</a>
+            <a href="https://other.com/b">B</a>
+            <a href="https://third.com/c">C</a>
+        </body></html>"""
+        actual = extract_page_data(input_body, input_url)
+        self.assertEqual(actual["internal_link_count"], 2)
+        self.assertEqual(actual["external_link_count"], 3)
+        self.assertEqual(actual["internal_link_count"], len(actual["internal_links"]))
+        self.assertEqual(actual["external_link_count"], len(actual["external_links"]))
+
     def test_url_is_not_normalized(self):
         input_url = "https://WWW.Crawler-Test.com/Blog/"
         actual = extract_page_data("<html></html>", input_url)
         self.assertEqual(actual["url"], "https://WWW.Crawler-Test.com/Blog/")
+
+
+class TestClassifyLinks(unittest.TestCase):
+    def test_splits_internal_from_external(self):
+        urls = [
+            "https://crawler-test.com/one",
+            "https://other.com/two",
+            "http://crawler-test.com/three",
+        ]
+        internal, external = classify_links(urls, "crawler-test.com")
+        self.assertEqual(
+            internal,
+            ["https://crawler-test.com/one", "http://crawler-test.com/three"],
+        )
+        self.assertEqual(external, ["https://other.com/two"])
+
+    def test_scheme_and_port_do_not_change_the_domain(self):
+        urls = ["http://crawler-test.com:8080/one", "https://crawler-test.com/two"]
+        internal, external = classify_links(urls, "crawler-test.com")
+        self.assertEqual(internal, urls)
+        self.assertEqual(external, [])
+
+    def test_host_comparison_is_case_insensitive(self):
+        internal, external = classify_links(["https://Crawler-Test.COM/one"], "crawler-test.com")
+        self.assertEqual(internal, ["https://Crawler-Test.COM/one"])
+        self.assertEqual(external, [])
+
+    def test_empty_list(self):
+        self.assertEqual(classify_links([], "crawler-test.com"), ([], []))
+
+
+class TestCrawlHelpers(unittest.TestCase):
+    def test_looks_like_binary_matches_known_extensions(self):
+        for url in [
+            "https://crawler-test.com/manual.pdf",
+            "https://crawler-test.com/photo.JPG",
+            "https://crawler-test.com/archive.tar.gz",
+            "https://crawler-test.com/style.css?v=2",
+        ]:
+            with self.subTest(url=url):
+                self.assertTrue(looks_like_binary(url))
+
+    def test_looks_like_binary_leaves_pages_alone(self):
+        for url in [
+            "https://crawler-test.com/",
+            "https://crawler-test.com/about",
+            "https://crawler-test.com/index.html",
+            "https://crawler-test.com/report.pdfs",
+        ]:
+            with self.subTest(url=url):
+                self.assertFalse(looks_like_binary(url))
+
+    def test_decode_body_uses_the_declared_charset(self):
+        self.assertEqual(decode_body("café".encode("latin-1"), "latin-1"), "café")
+
+    def test_decode_body_falls_back_to_utf8(self):
+        self.assertEqual(decode_body("café".encode("utf-8"), None), "café")
+
+    def test_decode_body_survives_a_bogus_charset(self):
+        self.assertEqual(decode_body(b"hello", "not-a-real-charset"), "hello")
+
+    def test_decode_body_replaces_undecodable_bytes(self):
+        self.assertEqual(decode_body(b"a\xffb", "utf-8"), "a�b")
+
+    def test_parse_retry_after(self):
+        self.assertEqual(parse_retry_after("12"), 12.0)
+        self.assertIsNone(parse_retry_after(None))
+        self.assertIsNone(parse_retry_after("-1"))
+        self.assertIsNone(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"))
+
+    def test_retry_delay_backs_off(self):
+        self.assertEqual(retry_delay(1), 1.0)
+        self.assertEqual(retry_delay(2), 2.0)
+        self.assertEqual(retry_delay(3), 4.0)
+
+    def test_retry_delay_prefers_retry_after(self):
+        self.assertEqual(retry_delay(1, 7.0), 7.0)
+
+    def test_retry_delay_is_capped(self):
+        self.assertEqual(retry_delay(1, 9999.0), 30.0)
+        self.assertEqual(retry_delay(20), 30.0)
 
 
 if __name__ == "__main__":

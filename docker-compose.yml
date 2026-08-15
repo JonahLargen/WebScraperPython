@@ -1,0 +1,14 @@
+services:
+  crawler:
+    build: .
+    image: webscraperpython:latest
+    container_name: webscraper-crawler
+    env_file:
+      - .env
+    environment:
+      OUTPUT_DIR: /app/output
+    user: "0:0"
+    volumes:
+      - ./output:/app/output
+    restart: unless-stopped
+    stop_grace_period: 60s
