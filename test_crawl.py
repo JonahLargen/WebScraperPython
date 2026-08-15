@@ -1,6 +1,10 @@
 import unittest
 
-from crawl import normalize_url
+from crawl import (
+    get_first_paragraph_from_html,
+    get_heading_from_html,
+    normalize_url,
+)
 
 
 class TestNormalizeURL(unittest.TestCase):
@@ -124,6 +128,143 @@ class TestNormalizeURL(unittest.TestCase):
     def test_non_string_url_raises(self):
         with self.assertRaises(TypeError):
             normalize_url(None)
+
+
+class TestGetHeadingFromHTML(unittest.TestCase):
+    def test_get_heading_from_html_basic(self):
+        input_body = "<html><body><h1>Test Title</h1></body></html>"
+        actual = get_heading_from_html(input_body)
+        expected = "Test Title"
+        self.assertEqual(actual, expected)
+
+    def test_falls_back_to_h2(self):
+        input_body = "<html><body><h2>Second Level</h2><p>Body.</p></body></html>"
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "Second Level")
+
+    def test_prefers_h1_over_earlier_h2(self):
+        input_body = """<html><body>
+            <h2>Sidebar Heading</h2>
+            <h1>Real Title</h1>
+        </body></html>"""
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "Real Title")
+
+    def test_returns_empty_string_when_no_heading(self):
+        input_body = "<html><body><p>Just a paragraph.</p></body></html>"
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "")
+
+    def test_returns_empty_string_for_empty_html(self):
+        self.assertEqual(get_heading_from_html(""), "")
+
+    def test_returns_first_h1_when_multiple(self):
+        input_body = "<html><body><h1>First</h1><h1>Second</h1></body></html>"
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "First")
+
+    def test_includes_text_of_nested_tags(self):
+        input_body = "<h1>Welcome to <em>Boot.dev</em>!</h1>"
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "Welcome to Boot.dev!")
+
+    def test_collapses_surrounding_whitespace(self):
+        input_body = """<html><body>
+            <h1>
+                Test    Title
+            </h1>
+        </body></html>"""
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "Test Title")
+
+    def test_finds_heading_nested_in_other_tags(self):
+        input_body = """<html><body>
+            <header><div class="hero"><h1>Nested Title</h1></div></header>
+        </body></html>"""
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "Nested Title")
+
+    def test_handles_unclosed_tag(self):
+        actual = get_heading_from_html("<html><body><h1>Unclosed Title")
+        self.assertEqual(actual, "Unclosed Title")
+
+    def test_empty_h1_does_not_fall_back_to_h2(self):
+        input_body = "<html><body><h1></h1><h2>Second Level</h2></body></html>"
+        actual = get_heading_from_html(input_body)
+        self.assertEqual(actual, "")
+
+
+class TestGetFirstParagraphFromHTML(unittest.TestCase):
+    def test_get_first_paragraph_from_html_main_priority(self):
+        input_body = """<html><body>
+            <p>Outside paragraph.</p>
+            <main>
+                <p>Main paragraph.</p>
+            </main>
+        </body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        expected = "Main paragraph."
+        self.assertEqual(actual, expected)
+
+    def test_first_paragraph_without_main(self):
+        input_body = """<html><body>
+            <p>First paragraph.</p>
+            <p>Second paragraph.</p>
+        </body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "First paragraph.")
+
+    def test_first_paragraph_inside_main(self):
+        input_body = """<html><body>
+            <main>
+                <p>Main paragraph.</p>
+                <p>Another main paragraph.</p>
+            </main>
+        </body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "Main paragraph.")
+
+    def test_returns_empty_string_when_no_paragraph(self):
+        input_body = "<html><body><h1>Only a title</h1></body></html>"
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "")
+
+    def test_returns_empty_string_for_empty_html(self):
+        self.assertEqual(get_first_paragraph_from_html(""), "")
+
+    def test_falls_back_when_main_has_no_paragraph(self):
+        input_body = """<html><body>
+            <p>Outside paragraph.</p>
+            <main><h1>Title only</h1></main>
+        </body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "Outside paragraph.")
+
+    def test_finds_paragraph_nested_inside_main(self):
+        input_body = """<html><body>
+            <p>Outside paragraph.</p>
+            <main><article><div><p>Deeply nested.</p></div></article></main>
+        </body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "Deeply nested.")
+
+    def test_includes_text_of_nested_tags(self):
+        input_body = "<p>Learn to code by building <b>real</b> projects.</p>"
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "Learn to code by building real projects.")
+
+    def test_collapses_surrounding_whitespace(self):
+        input_body = """<html><body><main>
+            <p>
+                Main      paragraph.
+            </p>
+        </main></body></html>"""
+        actual = get_first_paragraph_from_html(input_body)
+        self.assertEqual(actual, "Main paragraph.")
+
+    def test_handles_unclosed_tag(self):
+        actual = get_first_paragraph_from_html("<html><body><p>Unclosed paragraph.")
+        self.assertEqual(actual, "Unclosed paragraph.")
 
 
 if __name__ == "__main__":
