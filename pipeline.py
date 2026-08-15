@@ -46,7 +46,7 @@ def write_graph(settings, page_data):
         return None
 
     try:
-        # imported here so a missing matplotlib never costs us the json report
+        # imported here so a missing matplotlib does not break the json report
         from graph_report import write_graph_report
 
         graph_path = write_graph_report(page_data, settings.graph_path())

@@ -28,7 +28,7 @@ MAX_RETRY_DELAY = 30.0
 
 RETRYABLE_STATUSES = (408, 425, 429, 500, 502, 503, 504)
 
-# extensions worth skipping before we spend a request finding out they are not html
+# never html, so they are skipped without a request
 SKIP_EXTENSIONS = (
     ".7z", ".avi", ".bmp", ".bz2", ".css", ".csv", ".doc", ".docx", ".exe",
     ".gif", ".gz", ".ico", ".jpeg", ".jpg", ".js", ".json", ".mov", ".mp3",
@@ -122,7 +122,7 @@ class AsyncCrawler:
         if get_host(current_url) != self.base_domain:
             return # off-site, we only crawl the one domain
         if looks_like_binary(current_url):
-            return # .pdf, .zip and friends are never worth fetching
+            return # see SKIP_EXTENSIONS
 
         # the semaphore caps requests in flight, and claiming inside it keeps
         # queued tasks from reserving every max_pages slot before a fetch lands

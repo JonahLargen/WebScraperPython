@@ -57,7 +57,7 @@ async def run_cycle(settings):
         await asyncio.wait_for(run_report(settings), timeout=timeout)
     except asyncio.TimeoutError:
         logger.error("crawl ran longer than %d minutes, gave up on this cycle", settings.run_timeout_minutes)
-    except Exception: # one bad cycle must never take the scheduler down
+    except Exception: # a failed cycle must not stop the loop
         logger.exception("crawl cycle failed")
 
 

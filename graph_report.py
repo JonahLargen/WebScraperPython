@@ -82,7 +82,7 @@ def build_graph(page_data):
         for link in page["internal_links"]:
             target = safe_normalize(link)
             if target is None or target == normalized_url:
-                continue # self links add noise, not information
+                continue # self links add noise
             if target in page_data: # a link we never crawled has no node to point at
                 graph.add_edge(normalized_url, target)
 
