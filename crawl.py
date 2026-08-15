@@ -1,9 +1,14 @@
 from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
+import requests
 from bs4 import BeautifulSoup, Tag
 
 CRAWLABLE_SCHEMES = ("http", "https")
+
+USER_AGENT = "BootCrawler/1.0"
+
+TIMEOUT_SECONDS = 10
 
 DEFAULT_PORTS = {
     "http": 80,
@@ -44,6 +49,21 @@ def normalize_url(url):
     path = parts.path.rstrip("/")
 
     return host + path
+
+
+def get_html(url):
+    response = requests.get(
+        url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=TIMEOUT_SECONDS,
+    )
+    response.raise_for_status() # raises requests.HTTPError on 400+
+
+    content_type = response.headers.get("Content-Type", "")
+    if not content_type.strip().lower().startswith("text/html"):
+        raise ValueError(f"expected text/html, got '{content_type}' for {url}")
+
+    return response.text
 
 
 def extract_page_data(html: str, page_url: str) -> PageData:
